@@ -1,0 +1,170 @@
+import importlib
+from http.cookies import SimpleCookie
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+from fastapi import Response
+from fastapi.datastructures import Headers
+
+
+def load_app(tmp_path, monkeypatch):
+    monkeypatch.setenv("EDUTICTAC_ID_DB", str(tmp_path / "id.db"))
+    monkeypatch.setenv("EDUTICTAC_ID_SECRET", "test-secret")
+    monkeypatch.setenv("EDUTICTAC_ID_TEACHER_TOKEN", "teacher-token")
+    monkeypatch.setenv("EDUTICTAC_ID_COOKIE_SECURE", "0")
+    monkeypatch.setenv("EDUTICTAC_ID_PIN_HASH_ITERATIONS", "1000")
+    import main
+
+    importlib.reload(main)
+    return main
+
+
+def request(headers=None, cookies=None, host="127.0.0.1"):
+    return SimpleNamespace(
+        headers=Headers(headers or {}),
+        cookies=cookies or {},
+        client=SimpleNamespace(host=host),
+    )
+
+
+def teacher_request():
+    return request(headers={"Authorization": "Bearer teacher-token"})
+
+
+def cookie_from_response(response, name):
+    jar = SimpleCookie()
+    for key, value in response.raw_headers:
+        if key.lower() == b"set-cookie":
+            jar.load(value.decode())
+    return jar[name].value
+
+
+def raises_status(status_code, func, *args, **kwargs):
+    with pytest.raises(HTTPException) as exc:
+        func(*args, **kwargs)
+    assert exc.value.status_code == status_code
+
+
+def test_generates_unique_codes_and_hashes_pin(tmp_path, monkeypatch):
+    main = load_app(tmp_path, monkeypatch)
+    body = main.create_batch(main.BatchIn(count=30, pin_length=4), teacher_request())
+    assert body["group"]["group_code"].startswith("G")
+    codes = [item["public_code"] for item in body["identities"]]
+    assert len(codes) == len(set(codes))
+    assert all(len(code) == 3 for code in codes)
+    assert all(not any(ch in code for ch in "0O1IL") for code in codes)
+    assert all(len(item["pin"]) == 4 for item in body["identities"])
+
+    with main.get_conn() as conn:
+        rows = conn.execute("SELECT pin_hash FROM student_identities").fetchall()
+    pins = [item["pin"] for item in body["identities"]]
+    assert rows
+    assert all("pbkdf2_sha256$" in row["pin_hash"] for row in rows)
+    assert all(row["pin_hash"] not in pins for row in rows)
+
+
+def test_student_login_score_ranking_and_logout(tmp_path, monkeypatch):
+    main = load_app(tmp_path, monkeypatch)
+    created = main.create_batch(main.BatchIn(count=1), teacher_request())
+    group_id = created["group"]["id"]
+    identity = created["identities"][0]
+
+    raises_status(
+        401,
+        main.student_login,
+        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin="9999"),
+        request(),
+        Response(),
+    )
+
+    response = Response()
+    ok = main.student_login(
+        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin=identity["pin"]),
+        request(),
+        response,
+    )
+    assert ok["identity"]["public_code"] == identity["public_code"]
+    session_cookie = cookie_from_response(response, main.SESSION_COOKIE)
+    student_request = request(cookies={main.SESSION_COOKIE: session_cookie})
+
+    assert main.me(student_request)["identity"]["public_code"] == identity["public_code"]
+    score = main.add_score(
+        main.ScoreIn(app_id="edumusic", activity_id="sol-mi", score=980),
+        student_request,
+    )
+    assert score["score"] == 980
+
+    raises_status(401, main.rankings, request(), app_id="edumusic", activity_id="sol-mi", limit=10)
+    ranking = main.rankings(student_request, app_id="edumusic", activity_id="sol-mi", limit=10)
+    assert ranking[0]["public_code"] == identity["public_code"]
+    assert set(ranking[0]) == {"public_code", "score", "ts"}
+
+    stats = main.teacher_stats_csv(teacher_request(), group_id=group_id)
+    assert "group_code,public_code,app_id,activity_id,attempts,best_score,last_score_at" in stats
+    assert identity["public_code"] in stats
+    assert "edumusic" in stats
+    assert "980" in stats
+
+    assert main.logout(student_request, Response()) == {"ok": True}
+    raises_status(401, main.me, student_request)
+
+
+def test_regenerate_pin_revokes_old_sessions(tmp_path, monkeypatch):
+    main = load_app(tmp_path, monkeypatch)
+    created = main.create_batch(main.BatchIn(count=1), teacher_request())
+    group_id = created["group"]["id"]
+    identity = created["identities"][0]
+
+    response = Response()
+    main.student_login(
+        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin=identity["pin"]),
+        request(),
+        response,
+    )
+    session_cookie = cookie_from_response(response, main.SESSION_COOKIE)
+    student_request = request(cookies={main.SESSION_COOKIE: session_cookie})
+    assert main.me(student_request)["identity"]["public_code"] == identity["public_code"]
+
+    rotated = main.regenerate_pin(identity["id"], teacher_request(), pin_length=4)
+    new_pin = rotated["pin"]
+    assert new_pin != identity["pin"]
+    raises_status(401, main.me, student_request)
+
+    raises_status(
+        401,
+        main.student_login,
+        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin=identity["pin"]),
+        request(),
+        Response(),
+    )
+    assert main.student_login(
+        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin=new_pin),
+        request(),
+        Response(),
+    )["identity"]["public_code"] == identity["public_code"]
+
+
+def test_revoke_and_moodle_plan(tmp_path, monkeypatch):
+    main = load_app(tmp_path, monkeypatch)
+    created = main.create_batch(main.BatchIn(count=2), teacher_request())
+    group_id = created["group"]["id"]
+    identity = created["identities"][0]
+
+    moodle = main.moodle_provision(
+        main.MoodleProvisionIn(group_id=group_id, course_id="42"),
+        teacher_request(),
+    )
+    assert moodle["mode"] == "planned"
+    assert moodle["users"][0]["firstname"] == "Alumne"
+    assert all(user["email"].endswith("@invalid.edutictac.local") for user in moodle["users"])
+    assert "pin" not in str(moodle).lower()
+
+    assert main.revoke_identity(identity["id"], teacher_request()) == {"ok": True}
+    raises_status(
+        401,
+        main.student_login,
+        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin=identity["pin"]),
+        request(),
+        Response(),
+    )
