@@ -1,11 +1,15 @@
 import importlib
+import sys
 from http.cookies import SimpleCookie
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 from fastapi import Response
 from fastapi.datastructures import Headers
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def load_app(tmp_path, monkeypatch):
@@ -145,20 +149,22 @@ def test_regenerate_pin_revokes_old_sessions(tmp_path, monkeypatch):
     )["identity"]["public_code"] == identity["public_code"]
 
 
-def test_revoke_and_moodle_plan(tmp_path, monkeypatch):
+def test_revoke_and_app_roster(tmp_path, monkeypatch):
     main = load_app(tmp_path, monkeypatch)
     created = main.create_batch(main.BatchIn(count=2), teacher_request())
     group_id = created["group"]["id"]
     identity = created["identities"][0]
 
-    moodle = main.moodle_provision(
-        main.MoodleProvisionIn(group_id=group_id, course_id="42"),
+    roster = main.app_roster(
+        "EduHoot",
+        main.AppRosterIn(group_id=group_id),
         teacher_request(),
     )
-    assert moodle["mode"] == "planned"
-    assert moodle["users"][0]["firstname"] == "Alumne"
-    assert all(user["email"].endswith("@invalid.edutictac.local") for user in moodle["users"])
-    assert "pin" not in str(moodle).lower()
+    assert roster["app_id"] == "eduhoot"
+    assert roster["group_id"] == group_id
+    assert roster["identities"][0]["app_user"].startswith("eduhoot-")
+    assert "public_code" in roster["identities"][0]
+    assert "pin" not in str(roster).lower()
 
     assert main.revoke_identity(identity["id"], teacher_request()) == {"ok": True}
     raises_status(

@@ -32,12 +32,11 @@ guardar noms, correus, telèfons, NIA ni identificadors institucionals.
 - `GET /api/teacher/stats.csv`
 - `GET /api/groups/{group_id}/cards`
 - `GET /api/groups/{group_id}/csv`
-- `POST /api/moodle/provision`
-- `POST /api/moodle/enrol`
+- `POST /api/apps/{app_id}/roster`
 
-Els endpoints de Moodle són encara preparatoris: retornen el pla d'usuaris
-pseudònims (`edu-k7p`, `Alumne K7P`, correu tècnic no enrutable). No contacten
-amb cap Moodle real fins que s'afija la integració amb el webservice de Moodle.
+El roster per aplicació retorna només codis pseudònims i identificadors tècnics
+derivats (`eduhoot-k7p`, `banc-recursos-k7p`). No publica PINs ni dades reals
+de l'alumnat.
 
 ## Execució local
 
@@ -69,6 +68,11 @@ Els rànquings no són públics oberts: només els pot consultar alumnat amb ses
 EduTicTac ID o professorat autenticat. El professorat disposa també d'una
 exportació CSV d'estadístiques per grup amb codi pseudònim, activitat, intents,
 millor puntuació i última data.
+
+Les aplicacions EduTicTac poden demanar el roster pseudònim del seu grup amb
+`POST /api/apps/{app_id}/roster`. Aquest contracte serveix per connectar
+EduHoot, Banc de recursos o altres eines pròpies sense crear dependències amb
+plataformes descartades o externes.
 
 ## Configuració
 

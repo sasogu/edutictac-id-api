@@ -91,7 +91,6 @@ def init_db() -> None:
                 public_code TEXT NOT NULL,
                 pin_hash TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
-                moodle_user_id TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 pin_rotated_at TEXT,
@@ -229,7 +228,6 @@ def public_identity(row: sqlite3.Row) -> dict[str, Any]:
         "group_id": row["group_id"],
         "public_code": row["public_code"],
         "active": bool(row["active"]),
-        "moodle_user_id": row["moodle_user_id"] or None,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -358,9 +356,15 @@ class ScoreIn(BaseModel):
         return value
 
 
-class MoodleProvisionIn(BaseModel):
+class AppRosterIn(BaseModel):
     group_id: str
-    course_id: str | None = None
+
+
+def normalize_app_id(raw: str) -> str:
+    app_id = re.sub(r"[^a-z0-9_-]+", "-", (raw or "").lower()).strip("-")[:64]
+    if not app_id:
+        raise HTTPException(status_code=400, detail="invalid app_id")
+    return app_id
 
 
 @app.get("/api/health")
@@ -536,10 +540,10 @@ def add_score(payload: ScoreIn, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="not authenticated")
     score_id = secrets.token_urlsafe(12)
     ts = iso_now()
-    app_id = re.sub(r"[^a-z0-9_-]+", "-", payload.app_id.lower()).strip("-")[:64]
+    app_id = normalize_app_id(payload.app_id)
     activity_id = re.sub(r"[^a-z0-9_.:-]+", "-", payload.activity_id.lower()).strip("-")[:128]
-    if not app_id or not activity_id:
-        raise HTTPException(status_code=400, detail="invalid app_id or activity_id")
+    if not activity_id:
+        raise HTTPException(status_code=400, detail="invalid activity_id")
     with get_conn() as conn:
         conn.execute(
             """
@@ -559,7 +563,7 @@ def rankings(
     limit: int = Query(10, ge=1, le=100),
 ) -> list[dict[str, Any]]:
     require_ranking_viewer(request)
-    app_key = re.sub(r"[^a-z0-9_-]+", "-", app_id.lower()).strip("-")[:64]
+    app_key = normalize_app_id(app_id)
     activity_key = re.sub(r"[^a-z0-9_.:-]+", "-", activity_id.lower()).strip("-")[:128]
     with get_conn() as conn:
         rows = conn.execute(
@@ -674,34 +678,25 @@ def export_codes_csv(group_id: str, request: Request) -> str:
     return out.getvalue()
 
 
-@app.post("/api/moodle/provision")
-def moodle_provision(payload: MoodleProvisionIn, request: Request) -> dict[str, Any]:
+@app.post("/api/apps/{app_id}/roster")
+def app_roster(app_id: str, payload: AppRosterIn, request: Request) -> dict[str, Any]:
     require_teacher(request)
+    app_key = normalize_app_id(app_id)
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT id, public_code, moodle_user_id FROM student_identities
+            SELECT id, public_code FROM student_identities
             WHERE group_id = ? AND active = 1
             ORDER BY public_code
             """,
             (payload.group_id,),
         ).fetchall()
-    users = [
+    identities = [
         {
             "identity_id": row["id"],
-            "username": f"edu-{row['public_code'].lower()}",
-            "firstname": "Alumne",
-            "lastname": row["public_code"],
-            "email": f"edu-{row['public_code'].lower()}@invalid.edutictac.local",
-            "moodle_user_id": row["moodle_user_id"] or None,
-            "course_id": payload.course_id,
+            "public_code": row["public_code"],
+            "app_user": f"{app_key}-{row['public_code'].lower()}",
         }
         for row in rows
     ]
-    return {"mode": "planned", "group_id": payload.group_id, "users": users}
-
-
-@app.post("/api/moodle/enrol")
-def moodle_enrol(payload: MoodleProvisionIn, request: Request) -> dict[str, Any]:
-    require_teacher(request)
-    return {"mode": "planned", "group_id": payload.group_id, "course_id": payload.course_id, "enrolled": 0}
+    return {"app_id": app_key, "group_id": payload.group_id, "identities": identities}
