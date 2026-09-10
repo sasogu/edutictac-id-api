@@ -6,6 +6,10 @@ El servei permet generar codis públics i PINs privats perquè l'alumnat puga
 mantindre rànquings, preferits o progrés entre aplicacions EduTicTac sense
 guardar noms, correus, telèfons, NIA ni identificadors institucionals.
 
+Usa `edutictac-community` com a nucli comú per a SQLite, rate limit i cookies
+firmades. La lògica sensible d'identitat, PINs, grups opacs, sessions
+d'alumnat i puntuacions pseudònimes continua en aquest servei.
+
 ## Principis
 
 - El codi públic (`K7P`) és el que apareix en rànquings.
@@ -53,6 +57,29 @@ EDUTICTAC_ID_COOKIE_SECURE=0 \
 uvicorn main:app --host 127.0.0.1 --port 8005
 ```
 
+Tests:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+## Nucli comú
+
+Dependència estable actual:
+
+```txt
+edutictac-community @ git+https://git.edutictac.es/Edutictac/edutictac-community.git@v0.1.1
+```
+
+Components reutilitzats:
+
+- `edutictac_community.db.connect` per a SQLite amb WAL. El servei afegeix
+  localment `PRAGMA foreign_keys=ON`.
+- `edutictac_community.ratelimit.RateLimiter` per a intents d'accés.
+- `edutictac_community.session.SignedSession` per a cookies HMAC, mantenint els
+  wrappers interns `make_cookie` i `parse_cookie`.
+
 ## Exemple
 
 ```bash
@@ -87,6 +114,14 @@ plataformes descartades o externes.
 | `EDUTICTAC_ID_TEACHER_TOKEN` | Token provisional per al professorat fins a OIDC |
 | `EDUTICTAC_ID_COOKIE_DOMAIN` | Domini compartit opcional, per exemple `.edutictac.es` |
 | `EDUTICTAC_ID_COOKIE_SECURE` | `1` per defecte. Usa `0` només en desenvolupament local |
+
+## Desplegament actual
+
+En la instància EduTicTac el servei està instal·lat en `/opt/edutictac-id-api`,
+amb systemd `edutictac-id-api.service`, SQLite en
+`/opt/edutictac-id-api/data/id.db` i escoltant només en `127.0.0.1:8005`.
+No té vhost públic propi: el consumeixen altres backends, com `recursos-api`,
+per xarxa local del servidor.
 
 ## Mode Centres Educatius
 
