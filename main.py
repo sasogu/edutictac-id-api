@@ -120,6 +120,8 @@ def init_db() -> None:
                 ON scores(app_id, activity_id, score DESC, created_at ASC);
             CREATE INDEX IF NOT EXISTS idx_sessions_identity
                 ON student_sessions(identity_id);
+            CREATE INDEX IF NOT EXISTS idx_identities_public_code
+                ON student_identities(public_code);
             """
         )
 
@@ -337,7 +339,7 @@ class BatchIn(GroupIn):
 
 
 class StudentAuthIn(BaseModel):
-    group_id: str
+    group_id: str = ""
     public_code: str
     pin: str
 
@@ -425,8 +427,8 @@ def create_batch(payload: BatchIn, request: Request) -> dict[str, Any]:
             for _attempt in range(200):
                 code = make_code()
                 exists = conn.execute(
-                    "SELECT 1 FROM student_identities WHERE group_id = ? AND public_code = ?",
-                    (group_id, code),
+                    "SELECT 1 FROM student_identities WHERE public_code = ?",
+                    (code,),
                 ).fetchone()
                 if not exists:
                     break
@@ -453,19 +455,31 @@ def create_batch(payload: BatchIn, request: Request) -> dict[str, Any]:
 def student_login(payload: StudentAuthIn, request: Request, response: Response) -> dict[str, Any]:
     code = normalize_code(payload.public_code)
     pin = validate_pin(payload.pin)
-    key = f"{_client_ip(request)}:{payload.group_id}:{code}"
+    group_id = (payload.group_id or "").strip()
+    key = f"{_client_ip(request)}:{group_id}:{code}"
     if rate_limited(key):
         raise HTTPException(status_code=429, detail="too many attempts")
     with get_conn() as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM student_identities
-            WHERE group_id = ? AND public_code = ? AND active = 1
-            """,
-            (payload.group_id, code),
-        ).fetchone()
-    if not row or not verify_pin(pin, row["pin_hash"]):
+        if group_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM student_identities
+                WHERE group_id = ? AND public_code = ? AND active = 1
+                """,
+                (group_id, code),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM student_identities
+                WHERE public_code = ? AND active = 1
+                """,
+                (code,),
+            ).fetchall()
+    matches = [row for row in rows if verify_pin(pin, row["pin_hash"])]
+    if len(matches) != 1:
         raise HTTPException(status_code=401, detail="invalid code or PIN")
+    row = matches[0]
     set_student_session(response, row["id"])
     return {"identity": public_identity(row)}
 

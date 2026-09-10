@@ -77,14 +77,14 @@ def test_student_login_score_ranking_and_logout(tmp_path, monkeypatch):
     raises_status(
         401,
         main.student_login,
-        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin="9999"),
+        main.StudentAuthIn(public_code=identity["public_code"], pin="9999"),
         request(),
         Response(),
     )
 
     response = Response()
     ok = main.student_login(
-        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin=identity["pin"]),
+        main.StudentAuthIn(public_code=identity["public_code"], pin=identity["pin"]),
         request(),
         response,
     )
@@ -122,7 +122,7 @@ def test_regenerate_pin_revokes_old_sessions(tmp_path, monkeypatch):
 
     response = Response()
     main.student_login(
-        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin=identity["pin"]),
+        main.StudentAuthIn(public_code=identity["public_code"], pin=identity["pin"]),
         request(),
         response,
     )
@@ -138,12 +138,12 @@ def test_regenerate_pin_revokes_old_sessions(tmp_path, monkeypatch):
     raises_status(
         401,
         main.student_login,
-        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin=identity["pin"]),
+        main.StudentAuthIn(public_code=identity["public_code"], pin=identity["pin"]),
         request(),
         Response(),
     )
     assert main.student_login(
-        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin=new_pin),
+        main.StudentAuthIn(public_code=identity["public_code"], pin=new_pin),
         request(),
         Response(),
     )["identity"]["public_code"] == identity["public_code"]
@@ -170,7 +170,7 @@ def test_revoke_and_app_roster(tmp_path, monkeypatch):
     raises_status(
         401,
         main.student_login,
-        main.StudentAuthIn(group_id=group_id, public_code=identity["public_code"], pin=identity["pin"]),
+        main.StudentAuthIn(public_code=identity["public_code"], pin=identity["pin"]),
         request(),
         Response(),
     )

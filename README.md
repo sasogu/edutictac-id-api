@@ -11,10 +11,12 @@ guardar noms, correus, telèfons, NIA ni identificadors institucionals.
 - El codi públic (`K7P`) és el que apareix en rànquings.
 - El PIN només es mostra quan es genera o es regenera.
 - El PIN es guarda amb hash PBKDF2, mai en text pla.
-- La unicitat del codi és per grup.
+- Els codis nous es generen únics globalment perquè l'alumnat només haja
+  d'introduir codi públic + PIN.
 - El grup guardat al servidor és un codi opac (`G7F4K2`), no el nom real del
   centre, curs o aula.
-- El professorat gestiona la correspondència real fora de la plataforma.
+- El professorat gestiona la correspondència real fora de la plataforma; el
+  grup queda com a dada interna per a l'organització docent.
 
 ## Endpoints principals
 
@@ -60,9 +62,11 @@ curl -H 'Authorization: Bearer dev-teacher' \
   http://127.0.0.1:8005/api/identities/batch
 ```
 
-La resposta inclou un codi de grup opac i els PINs només en eixe moment. Després
-no es poden recuperar: cal regenerar-los. Si el professorat necessita saber que
-`G7F4K2` equival a `3ESO-A`, ho manté fora de la plataforma.
+La resposta inclou un codi de grup opac per al professorat i els PINs només en
+eixe moment. Després no es poden recuperar: cal regenerar-los. L'alumnat no
+necessita el codi de grup per iniciar sessió; amb el seu codi públic i PIN és
+suficient. Si el professorat necessita saber que `G7F4K2` equival a `3ESO-A`,
+ho manté fora de la plataforma.
 
 Els rànquings no són públics oberts: només els pot consultar alumnat amb sessió
 EduTicTac ID o professorat autenticat. El professorat disposa també d'una
