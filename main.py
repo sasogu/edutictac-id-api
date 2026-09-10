@@ -650,6 +650,39 @@ def teacher_summary(request: Request) -> dict[str, Any]:
     }
 
 
+@app.get("/api/teacher/identities")
+def teacher_identities(request: Request, limit: int = Query(200, ge=1, le=500)) -> dict[str, Any]:
+    require_teacher(request)
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT i.id, i.public_code, i.active, i.created_at, i.pin_rotated_at,
+                   g.id AS group_id, g.name AS group_name, g.tenant_id
+            FROM student_identities i
+            JOIN groups g ON g.id = i.group_id
+            WHERE i.active = 1
+            ORDER BY i.created_at DESC, i.public_code
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return {
+        "identities": [
+            {
+                "id": row["id"],
+                "public_code": row["public_code"],
+                "active": bool(row["active"]),
+                "created_at": row["created_at"],
+                "pin_rotated_at": row["pin_rotated_at"],
+                "group_id": row["group_id"],
+                "group_name": row["group_name"],
+                "tenant_id": row["tenant_id"],
+            }
+            for row in rows
+        ]
+    }
+
+
 @app.get("/api/groups/{group_id}/cards", response_class=HTMLResponse)
 def printable_cards(group_id: str, request: Request) -> str:
     require_teacher(request)

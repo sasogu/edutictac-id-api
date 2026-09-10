@@ -128,6 +128,19 @@ def test_teacher_summary_counts_groups(tmp_path, monkeypatch):
     assert {group["id"] for group in summary["groups"]} == {first["group"]["id"], second["group"]["id"]}
 
 
+def test_teacher_lists_identities_for_pin_regeneration(tmp_path, monkeypatch):
+    main = load_app(tmp_path, monkeypatch)
+    created = main.create_batch(main.BatchIn(count=2), teacher_request())
+
+    listed = main.teacher_identities(teacher_request(), limit=200)
+
+    assert {item["public_code"] for item in listed["identities"]} == {
+        item["public_code"] for item in created["identities"]
+    }
+    assert {item["id"] for item in listed["identities"]} == {item["id"] for item in created["identities"]}
+    assert all("pin" not in item for item in listed["identities"])
+
+
 def test_regenerate_pin_revokes_old_sessions(tmp_path, monkeypatch):
     main = load_app(tmp_path, monkeypatch)
     created = main.create_batch(main.BatchIn(count=1), teacher_request())
