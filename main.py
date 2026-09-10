@@ -624,6 +624,48 @@ def teacher_activity_assignments(
     return {"assignments": [public_assignment(row) for row in rows]}
 
 
+@app.get("/api/teacher/activity-assignments/{assignment_id}/results")
+def teacher_activity_assignment_results(assignment_id: str, request: Request) -> dict[str, Any]:
+    teacher_id = require_teacher(request)
+    with get_conn() as conn:
+        assignment = conn.execute(
+            """
+            SELECT * FROM activity_assignments
+            WHERE id = ? AND created_by_teacher_id = ? AND active = 1
+            """,
+            (assignment_id, teacher_id),
+        ).fetchone()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="assignment not found")
+        rows = conn.execute(
+            """
+            SELECT
+                i.public_code,
+                COUNT(s.id) AS attempts,
+                MAX(s.score) AS best_score,
+                MAX(s.created_at) AS last_score_at
+            FROM scores s
+            JOIN student_identities i ON i.id = s.identity_id
+            WHERE s.assignment_id = ? AND i.active = 1
+            GROUP BY i.public_code
+            ORDER BY best_score DESC, last_score_at DESC, i.public_code
+            """,
+            (assignment_id,),
+        ).fetchall()
+    return {
+        "assignment": public_assignment(assignment),
+        "results": [
+            {
+                "public_code": row["public_code"],
+                "attempts": int(row["attempts"] or 0),
+                "best_score": row["best_score"],
+                "last_score_at": row["last_score_at"],
+            }
+            for row in rows
+        ],
+    }
+
+
 @app.post("/api/scores", status_code=201)
 def add_score(payload: ScoreIn, request: Request) -> dict[str, Any]:
     identity = current_identity(request)

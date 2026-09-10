@@ -35,6 +35,7 @@ d'alumnat i puntuacions pseudònimes continua en aquest servei.
 - `POST /api/identities/{id}/revoke`
 - `POST /api/teacher/activity-assignments`
 - `GET /api/teacher/activity-assignments`
+- `GET /api/teacher/activity-assignments/{id}/results`
 - `POST /api/scores` (`assignment_id` opcional quan el resultat pertany a una activitat proposada pel professorat)
 - `GET /api/rankings` (només alumnat amb sessió o professorat autenticat)
 - `GET /api/teacher/stats.csv`
@@ -109,7 +110,9 @@ pel professorat es representen amb `activity_assignments`: una assignació uneix
 prové d'una activitat proposada, `POST /api/scores` pot enviar `assignment_id`;
 el servei valida que l'assignació correspon al mateix recurs base i al grup de
 l'alumne. Això permet que dos docents usen el mateix recurs sense barrejar els
-resultats als futurs panells.
+resultats als futurs panells. El primer informe mínim és
+`GET /api/teacher/activity-assignments/{id}/results`, que retorna intents,
+millor puntuació i última data per codi pseudònim dins d'una assignació docent.
 
 Les aplicacions EduTicTac poden demanar el roster pseudònim del seu grup amb
 `POST /api/apps/{app_id}/roster`. Aquest contracte serveix per connectar

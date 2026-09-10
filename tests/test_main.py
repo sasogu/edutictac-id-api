@@ -201,6 +201,31 @@ def test_teacher_activity_assignments_scope_scores(tmp_path, monkeypatch):
         stored = conn.execute("SELECT assignment_id FROM scores WHERE id = ?", (score["id"],)).fetchone()
     assert stored["assignment_id"] == assignment["id"]
 
+    results = main.teacher_activity_assignment_results(assignment["id"], teacher_request())
+    assert results["assignment"]["id"] == assignment["id"]
+    assert results["results"] == [
+        {
+            "public_code": identity["public_code"],
+            "attempts": 1,
+            "best_score": 7,
+            "last_score_at": results["results"][0]["last_score_at"],
+        }
+    ]
+
+    second_score = main.add_score(
+        main.ScoreIn(
+            app_id="eduhoot",
+            activity_id="taula-2",
+            assignment_id=assignment["id"],
+            score=9,
+        ),
+        student_request,
+    )
+    assert second_score["score"] == 9
+    results = main.teacher_activity_assignment_results(assignment["id"], teacher_request())
+    assert results["results"][0]["attempts"] == 2
+    assert results["results"][0]["best_score"] == 9
+
 
 def test_score_rejects_assignment_for_other_group_or_activity(tmp_path, monkeypatch):
     main = load_app(tmp_path, monkeypatch)
