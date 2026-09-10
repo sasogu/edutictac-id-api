@@ -36,6 +36,7 @@ d'alumnat i puntuacions pseudònimes continua en aquest servei.
 - `POST /api/scores`
 - `GET /api/rankings` (només alumnat amb sessió o professorat autenticat)
 - `GET /api/teacher/stats.csv`
+- `GET /api/teacher/identities/by-code/{public_code}`
 - `GET /api/groups/{group_id}/cards`
 - `GET /api/groups/{group_id}/csv`
 - `POST /api/apps/{app_id}/roster`

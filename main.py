@@ -683,6 +683,37 @@ def teacher_identities(request: Request, limit: int = Query(200, ge=1, le=500)) 
     }
 
 
+@app.get("/api/teacher/identities/by-code/{public_code}")
+def teacher_identity_by_code(public_code: str, request: Request) -> dict[str, Any]:
+    require_teacher(request)
+    code = normalize_code(public_code)
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT i.id, i.public_code, i.active, i.created_at, i.pin_rotated_at,
+                   g.id AS group_id, g.name AS group_name, g.tenant_id
+            FROM student_identities i
+            JOIN groups g ON g.id = i.group_id
+            WHERE i.public_code = ? AND i.active = 1
+            """,
+            (code,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="identity not found")
+    return {
+        "identity": {
+            "id": row["id"],
+            "public_code": row["public_code"],
+            "active": bool(row["active"]),
+            "created_at": row["created_at"],
+            "pin_rotated_at": row["pin_rotated_at"],
+            "group_id": row["group_id"],
+            "group_name": row["group_name"],
+            "tenant_id": row["tenant_id"],
+        }
+    }
+
+
 @app.get("/api/groups/{group_id}/cards", response_class=HTMLResponse)
 def printable_cards(group_id: str, request: Request) -> str:
     require_teacher(request)

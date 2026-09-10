@@ -141,6 +141,18 @@ def test_teacher_lists_identities_for_pin_regeneration(tmp_path, monkeypatch):
     assert all("pin" not in item for item in listed["identities"])
 
 
+def test_teacher_finds_identity_by_public_code(tmp_path, monkeypatch):
+    main = load_app(tmp_path, monkeypatch)
+    created = main.create_batch(main.BatchIn(count=1), teacher_request())
+    identity = created["identities"][0]
+
+    found = main.teacher_identity_by_code(identity["public_code"].lower(), teacher_request())
+
+    assert found["identity"]["id"] == identity["id"]
+    assert found["identity"]["public_code"] == identity["public_code"]
+    assert "pin" not in found["identity"]
+
+
 def test_regenerate_pin_revokes_old_sessions(tmp_path, monkeypatch):
     main = load_app(tmp_path, monkeypatch)
     created = main.create_batch(main.BatchIn(count=1), teacher_request())
