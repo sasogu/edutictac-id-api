@@ -99,6 +99,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS scores (
                 id TEXT PRIMARY KEY,
                 identity_id TEXT NOT NULL REFERENCES student_identities(id) ON DELETE CASCADE,
+                assignment_id TEXT DEFAULT '',
                 app_id TEXT NOT NULL,
                 activity_id TEXT NOT NULL,
                 score INTEGER NOT NULL,
@@ -106,12 +107,37 @@ def init_db() -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS activity_assignments (
+                id TEXT PRIMARY KEY,
+                app_id TEXT NOT NULL,
+                activity_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                created_by_teacher_id TEXT NOT NULL DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_scores_rank
                 ON scores(app_id, activity_id, score DESC, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_assignments_teacher
+                ON activity_assignments(created_by_teacher_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_assignments_group
+                ON activity_assignments(group_id, active);
             CREATE INDEX IF NOT EXISTS idx_sessions_identity
                 ON student_sessions(identity_id);
             CREATE INDEX IF NOT EXISTS idx_identities_public_code
                 ON student_identities(public_code);
+            """
+        )
+        score_columns = {row["name"] for row in conn.execute("PRAGMA table_info(scores)").fetchall()}
+        if "assignment_id" not in score_columns:
+            conn.execute("ALTER TABLE scores ADD COLUMN assignment_id TEXT DEFAULT ''")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_scores_assignment
+                ON scores(assignment_id, score DESC, created_at ASC)
             """
         )
 
@@ -316,6 +342,7 @@ class StudentAuthIn(BaseModel):
 class ScoreIn(BaseModel):
     app_id: str
     activity_id: str
+    assignment_id: str = ""
     score: int
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -331,11 +358,39 @@ class AppRosterIn(BaseModel):
     group_id: str
 
 
+class ActivityAssignmentIn(BaseModel):
+    group_id: str
+    app_id: str
+    activity_id: str
+    title: str = ""
+
+
 def normalize_app_id(raw: str) -> str:
     app_id = re.sub(r"[^a-z0-9_-]+", "-", (raw or "").lower()).strip("-")[:64]
     if not app_id:
         raise HTTPException(status_code=400, detail="invalid app_id")
     return app_id
+
+
+def normalize_activity_id(raw: str) -> str:
+    activity_id = re.sub(r"[^a-z0-9_.:-]+", "-", (raw or "").lower()).strip("-")[:128]
+    if not activity_id:
+        raise HTTPException(status_code=400, detail="invalid activity_id")
+    return activity_id
+
+
+def public_assignment(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "app_id": row["app_id"],
+        "activity_id": row["activity_id"],
+        "title": row["title"],
+        "group_id": row["group_id"],
+        "created_by_teacher_id": row["created_by_teacher_id"],
+        "active": bool(row["active"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 @app.get("/api/health")
@@ -516,6 +571,59 @@ def revoke_identity(identity_id: str, request: Request) -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.post("/api/teacher/activity-assignments", status_code=201)
+def create_activity_assignment(payload: ActivityAssignmentIn, request: Request) -> dict[str, Any]:
+    teacher_id = require_teacher(request)
+    app_id = normalize_app_id(payload.app_id)
+    activity_id = normalize_activity_id(payload.activity_id)
+    title = (payload.title or "").strip()[:160]
+    assignment_id = secrets.token_urlsafe(14)
+    ts = iso_now()
+    with get_conn() as conn:
+        group = conn.execute("SELECT id FROM groups WHERE id = ?", (payload.group_id,)).fetchone()
+        if not group:
+            raise HTTPException(status_code=404, detail="group not found")
+        conn.execute(
+            """
+            INSERT INTO activity_assignments
+                (id, app_id, activity_id, title, group_id, created_by_teacher_id, active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """,
+            (assignment_id, app_id, activity_id, title, payload.group_id, teacher_id, ts, ts),
+        )
+        row = conn.execute(
+            "SELECT * FROM activity_assignments WHERE id = ?",
+            (assignment_id,),
+        ).fetchone()
+    return {"assignment": public_assignment(row)}
+
+
+@app.get("/api/teacher/activity-assignments")
+def teacher_activity_assignments(
+    request: Request,
+    group_id: str = "",
+    limit: int = Query(100, ge=1, le=500),
+) -> dict[str, Any]:
+    teacher_id = require_teacher(request)
+    params: list[Any] = [teacher_id]
+    where = "WHERE created_by_teacher_id = ? AND active = 1"
+    if group_id:
+        where += " AND group_id = ?"
+        params.append(group_id)
+    params.append(limit)
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM activity_assignments
+            {where}
+            ORDER BY created_at DESC, title, app_id, activity_id
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return {"assignments": [public_assignment(row) for row in rows]}
+
+
 @app.post("/api/scores", status_code=201)
 def add_score(payload: ScoreIn, request: Request) -> dict[str, Any]:
     identity = current_identity(request)
@@ -524,18 +632,47 @@ def add_score(payload: ScoreIn, request: Request) -> dict[str, Any]:
     score_id = secrets.token_urlsafe(12)
     ts = iso_now()
     app_id = normalize_app_id(payload.app_id)
-    activity_id = re.sub(r"[^a-z0-9_.:-]+", "-", payload.activity_id.lower()).strip("-")[:128]
-    if not activity_id:
-        raise HTTPException(status_code=400, detail="invalid activity_id")
+    activity_id = normalize_activity_id(payload.activity_id)
+    assignment_id = (payload.assignment_id or "").strip()
     with get_conn() as conn:
+        if assignment_id:
+            assignment = conn.execute(
+                """
+                SELECT id, app_id, activity_id, group_id
+                FROM activity_assignments
+                WHERE id = ? AND active = 1
+                """,
+                (assignment_id,),
+            ).fetchone()
+            if not assignment:
+                raise HTTPException(status_code=404, detail="assignment not found")
+            if assignment["app_id"] != app_id or assignment["activity_id"] != activity_id:
+                raise HTTPException(status_code=400, detail="assignment does not match activity")
+            if assignment["group_id"] != identity["group_id"]:
+                raise HTTPException(status_code=403, detail="assignment is not for this group")
         conn.execute(
             """
-            INSERT INTO scores (id, identity_id, app_id, activity_id, score, metadata_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO scores (id, identity_id, assignment_id, app_id, activity_id, score, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (score_id, identity["id"], app_id, activity_id, payload.score, json.dumps(payload.metadata), ts),
+            (
+                score_id,
+                identity["id"],
+                assignment_id,
+                app_id,
+                activity_id,
+                payload.score,
+                json.dumps(payload.metadata),
+                ts,
+            ),
         )
-    return {"ok": True, "id": score_id, "public_code": identity["public_code"], "score": payload.score}
+    return {
+        "ok": True,
+        "id": score_id,
+        "public_code": identity["public_code"],
+        "assignment_id": assignment_id,
+        "score": payload.score,
+    }
 
 
 @app.get("/api/rankings")

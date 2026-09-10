@@ -153,6 +153,103 @@ def test_teacher_finds_identity_by_public_code(tmp_path, monkeypatch):
     assert "pin" not in found["identity"]
 
 
+def test_teacher_activity_assignments_scope_scores(tmp_path, monkeypatch):
+    main = load_app(tmp_path, monkeypatch)
+    created = main.create_batch(main.BatchIn(count=1), teacher_request())
+    group_id = created["group"]["id"]
+    identity = created["identities"][0]
+
+    assignment = main.create_activity_assignment(
+        main.ActivityAssignmentIn(
+            group_id=group_id,
+            app_id="EduHoot",
+            activity_id="Taula-2",
+            title="Taula del 2",
+        ),
+        teacher_request(),
+    )["assignment"]
+
+    assert assignment["app_id"] == "eduhoot"
+    assert assignment["activity_id"] == "taula-2"
+    assert assignment["group_id"] == group_id
+    assert assignment["created_by_teacher_id"] == "teacher-token"
+
+    listed = main.teacher_activity_assignments(teacher_request(), group_id=group_id, limit=100)
+    assert [item["id"] for item in listed["assignments"]] == [assignment["id"]]
+
+    response = Response()
+    main.student_login(
+        main.StudentAuthIn(public_code=identity["public_code"], pin=identity["pin"]),
+        request(),
+        response,
+    )
+    session_cookie = cookie_from_response(response, main.SESSION_COOKIE)
+    student_request = request(cookies={main.SESSION_COOKIE: session_cookie})
+
+    score = main.add_score(
+        main.ScoreIn(
+            app_id="eduhoot",
+            activity_id="taula-2",
+            assignment_id=assignment["id"],
+            score=7,
+        ),
+        student_request,
+    )
+    assert score["assignment_id"] == assignment["id"]
+
+    with main.get_conn() as conn:
+        stored = conn.execute("SELECT assignment_id FROM scores WHERE id = ?", (score["id"],)).fetchone()
+    assert stored["assignment_id"] == assignment["id"]
+
+
+def test_score_rejects_assignment_for_other_group_or_activity(tmp_path, monkeypatch):
+    main = load_app(tmp_path, monkeypatch)
+    first = main.create_batch(main.BatchIn(count=1), teacher_request())
+    second = main.create_batch(main.BatchIn(count=1), teacher_request())
+    identity = first["identities"][0]
+
+    assignment = main.create_activity_assignment(
+        main.ActivityAssignmentIn(
+            group_id=second["group"]["id"],
+            app_id="eduhoot",
+            activity_id="quiz-a",
+        ),
+        teacher_request(),
+    )["assignment"]
+
+    response = Response()
+    main.student_login(
+        main.StudentAuthIn(public_code=identity["public_code"], pin=identity["pin"]),
+        request(),
+        response,
+    )
+    session_cookie = cookie_from_response(response, main.SESSION_COOKIE)
+    student_request = request(cookies={main.SESSION_COOKIE: session_cookie})
+
+    raises_status(
+        403,
+        main.add_score,
+        main.ScoreIn(
+            app_id="eduhoot",
+            activity_id="quiz-a",
+            assignment_id=assignment["id"],
+            score=4,
+        ),
+        student_request,
+    )
+    raises_status(
+        400,
+        main.add_score,
+        main.ScoreIn(
+            app_id="eduhoot",
+            activity_id="quiz-b",
+            assignment_id=assignment["id"],
+            score=4,
+        ),
+        student_request,
+    )
+
+
 def test_regenerate_pin_revokes_old_sessions(tmp_path, monkeypatch):
     main = load_app(tmp_path, monkeypatch)
     created = main.create_batch(main.BatchIn(count=1), teacher_request())
