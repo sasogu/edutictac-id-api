@@ -8,7 +8,6 @@ rotation.
 
 from __future__ import annotations
 
-import base64
 import csv
 import hashlib
 import hmac
@@ -18,16 +17,15 @@ import os
 import re
 import secrets
 import sqlite3
-import threading
-import time
-from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
+from edutictac_community.db import connect as db_connect
+from edutictac_community.ratelimit import RateLimiter
+from edutictac_community.session import SignedSession
 
 DB_PATH = os.environ.get("EDUTICTAC_ID_DB", "/var/lib/edutictac-id-api/id.db")
 SESSION_SECRET = os.environ.get("EDUTICTAC_ID_SECRET", "")
@@ -47,19 +45,11 @@ PIN_HASH_ITERATIONS = int(os.environ.get("EDUTICTAC_ID_PIN_HASH_ITERATIONS", "21
 
 app = FastAPI(title="EduTicTac ID API")
 
-_rate_lock = threading.Lock()
-_rate: dict[str, deque[float]] = defaultdict(deque)
-
-
-def _ensure_dir() -> None:
-    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+_rate_limiter = RateLimiter(max_calls=RATE_MAX, window_seconds=RATE_WINDOW)
 
 
 def get_conn() -> sqlite3.Connection:
-    _ensure_dir()
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
+    conn = db_connect(DB_PATH)
     conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
@@ -134,26 +124,13 @@ def require_secret() -> None:
         raise HTTPException(status_code=503, detail="service secret not configured")
 
 
-def _sign(data: str) -> str:
-    require_secret()
-    return hmac.new(SESSION_SECRET.encode(), data.encode(), hashlib.sha256).hexdigest()
-
-
 def make_cookie(payload: dict[str, Any]) -> str:
-    data = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
-    return f"{data}.{_sign(data)}"
+    require_secret()
+    return SignedSession(SESSION_SECRET, "").encode(payload)
 
 
 def parse_cookie(raw: str | None) -> dict[str, Any] | None:
-    if not raw or not SESSION_SECRET:
-        return None
-    try:
-        data, sig = raw.split(".", 1)
-        if not hmac.compare_digest(sig, _sign(data)):
-            return None
-        return json.loads(base64.urlsafe_b64decode(data.encode()).decode())
-    except Exception:
-        return None
+    return SignedSession(SESSION_SECRET, "").decode(raw)
 
 
 def cookie_kwargs(max_age: int | None = None) -> dict[str, Any]:
@@ -240,15 +217,7 @@ def _client_ip(request: Request) -> str:
 
 
 def rate_limited(key: str) -> bool:
-    now = time.monotonic()
-    with _rate_lock:
-        q = _rate[key]
-        while q and now - q[0] > RATE_WINDOW:
-            q.popleft()
-        if len(q) >= RATE_MAX:
-            return True
-        q.append(now)
-    return False
+    return _rate_limiter(key)
 
 
 def require_teacher(request: Request) -> str:
