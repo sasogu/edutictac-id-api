@@ -114,6 +114,20 @@ def test_student_login_score_ranking_and_logout(tmp_path, monkeypatch):
     raises_status(401, main.me, student_request)
 
 
+def test_teacher_summary_counts_groups(tmp_path, monkeypatch):
+    main = load_app(tmp_path, monkeypatch)
+    first = main.create_batch(main.BatchIn(count=2), teacher_request())
+    second = main.create_batch(main.BatchIn(count=1), teacher_request())
+
+    summary = main.teacher_summary(teacher_request())
+
+    assert summary["total"] == 3
+    assert summary["active"] == 3
+    assert summary["inactive"] == 0
+    assert [group["total"] for group in summary["groups"]] == [1, 2]
+    assert {group["id"] for group in summary["groups"]} == {first["group"]["id"], second["group"]["id"]}
+
+
 def test_regenerate_pin_revokes_old_sessions(tmp_path, monkeypatch):
     main = load_app(tmp_path, monkeypatch)
     created = main.create_batch(main.BatchIn(count=1), teacher_request())

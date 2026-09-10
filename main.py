@@ -603,6 +603,53 @@ def teacher_stats_csv(request: Request, group_id: str | None = None) -> str:
     return out.getvalue()
 
 
+@app.get("/api/teacher/summary")
+def teacher_summary(request: Request) -> dict[str, Any]:
+    require_teacher(request)
+    with get_conn() as conn:
+        totals = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) AS active,
+                SUM(CASE WHEN active = 0 THEN 1 ELSE 0 END) AS inactive
+            FROM student_identities
+            """
+        ).fetchone()
+        groups = conn.execute(
+            """
+            SELECT
+                g.id,
+                g.name,
+                g.tenant_id,
+                g.created_at,
+                COUNT(i.id) AS total,
+                SUM(CASE WHEN i.active = 1 THEN 1 ELSE 0 END) AS active
+            FROM groups g
+            LEFT JOIN student_identities i ON i.group_id = g.id
+            GROUP BY g.id, g.name, g.tenant_id, g.created_at
+            ORDER BY g.created_at DESC
+            LIMIT 20
+            """
+        ).fetchall()
+    return {
+        "total": int(totals["total"] or 0),
+        "active": int(totals["active"] or 0),
+        "inactive": int(totals["inactive"] or 0),
+        "groups": [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "tenant_id": row["tenant_id"],
+                "created_at": row["created_at"],
+                "total": int(row["total"] or 0),
+                "active": int(row["active"] or 0),
+            }
+            for row in groups
+        ],
+    }
+
+
 @app.get("/api/groups/{group_id}/cards", response_class=HTMLResponse)
 def printable_cards(group_id: str, request: Request) -> str:
     require_teacher(request)
