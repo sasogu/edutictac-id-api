@@ -139,13 +139,6 @@ Regles de desplegament recomanades:
 - Documentar responsable, finalitats, categories de dades, allotjament,
   conservació, destinataris i mesures de seguretat en una pàgina pública.
 
-## Resumen en castellano
-
-API de identidad pseudónima para alumnado. El profesorado genera códigos
-públicos y PINes; el alumnado inicia sesión solo con código + PIN. El servicio
-no guarda nombres, correos ni identificadores institucionales, y usa
-`edutictac-community` para SQLite, rate limit y cookies firmadas.
-
 ## Llicència
 
 MIT.
