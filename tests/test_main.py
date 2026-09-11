@@ -36,6 +36,10 @@ def teacher_request():
     return request(headers={"Authorization": "Bearer teacher-token"})
 
 
+def teacher_cookie_request(main, teacher_id):
+    return request(cookies={main.TEACHER_COOKIE: main.make_cookie({"teacher": True, "teacher_id": teacher_id})})
+
+
 def cookie_from_response(response, name):
     jar = SimpleCookie()
     for key, value in response.raw_headers:
@@ -151,6 +155,22 @@ def test_teacher_finds_identity_by_public_code(tmp_path, monkeypatch):
     assert found["identity"]["id"] == identity["id"]
     assert found["identity"]["public_code"] == identity["public_code"]
     assert "pin" not in found["identity"]
+
+
+def test_teacher_identity_views_are_scoped_to_owner(tmp_path, monkeypatch):
+    main = load_app(tmp_path, monkeypatch)
+    first_teacher = teacher_cookie_request(main, "teacher-a")
+    second_teacher = teacher_cookie_request(main, "teacher-b")
+    first = main.create_batch(main.BatchIn(count=1), first_teacher)
+    second = main.create_batch(main.BatchIn(count=1), second_teacher)
+
+    listed = main.teacher_identities(first_teacher, limit=200)
+
+    assert [item["id"] for item in listed["identities"]] == [first["identities"][0]["id"]]
+    raises_status(404, main.teacher_identity_by_code, second["identities"][0]["public_code"], first_teacher)
+    summary = main.teacher_summary(first_teacher)
+    assert summary["total"] == 1
+    assert [group["id"] for group in summary["groups"]] == [first["group"]["id"]]
 
 
 def test_teacher_activity_assignments_scope_scores(tmp_path, monkeypatch):
@@ -273,6 +293,27 @@ def test_score_rejects_assignment_for_other_group_or_activity(tmp_path, monkeypa
         ),
         student_request,
     )
+
+
+def test_teacher_cannot_manage_another_teachers_group_or_identity(tmp_path, monkeypatch):
+    main = load_app(tmp_path, monkeypatch)
+    owner = teacher_cookie_request(main, "owner")
+    other = teacher_cookie_request(main, "other")
+    created = main.create_batch(main.BatchIn(count=1), owner)
+    group_id = created["group"]["id"]
+    identity_id = created["identities"][0]["id"]
+
+    raises_status(404, main.regenerate_pin, identity_id, other, 4)
+    raises_status(404, main.revoke_identity, identity_id, other)
+    raises_status(
+        404,
+        main.create_activity_assignment,
+        main.ActivityAssignmentIn(group_id=group_id, app_id="eduhoot", activity_id="quiz-a"),
+        other,
+    )
+    raises_status(404, main.printable_cards, group_id, other)
+    raises_status(404, main.export_codes_csv, group_id, other)
+    raises_status(404, main.app_roster, "eduhoot", main.AppRosterIn(group_id=group_id), other)
 
 
 def test_regenerate_pin_revokes_old_sessions(tmp_path, monkeypatch):

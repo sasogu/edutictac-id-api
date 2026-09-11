@@ -399,9 +399,11 @@ def health() -> dict[str, str]:
 
 
 @app.post("/api/teacher/login")
-def teacher_login(payload: TeacherLoginIn, response: Response) -> dict[str, bool]:
+def teacher_login(payload: TeacherLoginIn, request: Request, response: Response) -> dict[str, bool]:
     if not TEACHER_TOKEN:
         raise HTTPException(status_code=503, detail="teacher token not configured")
+    if rate_limited(f"teacher-login:{_client_ip(request)}"):
+        raise HTTPException(status_code=429, detail="too many attempts")
     if not hmac.compare_digest(payload.token.encode(), TEACHER_TOKEN.encode()):
         raise HTTPException(status_code=401, detail="invalid teacher token")
     response.set_cookie(
@@ -532,7 +534,7 @@ def logout(request: Request, response: Response) -> dict[str, bool]:
 
 @app.post("/api/identities/{identity_id}/regenerate-pin")
 def regenerate_pin(identity_id: str, request: Request, pin_length: int = Query(4)) -> dict[str, str]:
-    require_teacher(request)
+    teacher_id = require_teacher(request)
     pin = make_pin(pin_length)
     ts = iso_now()
     with get_conn() as conn:
@@ -540,9 +542,13 @@ def regenerate_pin(identity_id: str, request: Request, pin_length: int = Query(4
             """
             UPDATE student_identities
             SET pin_hash = ?, updated_at = ?, pin_rotated_at = ?
-            WHERE id = ? AND active = 1
+            WHERE id = ?
+              AND active = 1
+              AND group_id IN (
+                  SELECT id FROM groups WHERE created_by_teacher_id = ?
+              )
             """,
-            (hash_pin(pin), ts, ts, identity_id),
+            (hash_pin(pin), ts, ts, identity_id, teacher_id),
         )
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="identity not found")
@@ -555,12 +561,19 @@ def regenerate_pin(identity_id: str, request: Request, pin_length: int = Query(4
 
 @app.post("/api/identities/{identity_id}/revoke")
 def revoke_identity(identity_id: str, request: Request) -> dict[str, bool]:
-    require_teacher(request)
+    teacher_id = require_teacher(request)
     ts = iso_now()
     with get_conn() as conn:
         cur = conn.execute(
-            "UPDATE student_identities SET active = 0, updated_at = ? WHERE id = ?",
-            (ts, identity_id),
+            """
+            UPDATE student_identities
+            SET active = 0, updated_at = ?
+            WHERE id = ?
+              AND group_id IN (
+                  SELECT id FROM groups WHERE created_by_teacher_id = ?
+              )
+            """,
+            (ts, identity_id, teacher_id),
         )
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="identity not found")
@@ -580,7 +593,10 @@ def create_activity_assignment(payload: ActivityAssignmentIn, request: Request) 
     assignment_id = secrets.token_urlsafe(14)
     ts = iso_now()
     with get_conn() as conn:
-        group = conn.execute("SELECT id FROM groups WHERE id = ?", (payload.group_id,)).fetchone()
+        group = conn.execute(
+            "SELECT id FROM groups WHERE id = ? AND created_by_teacher_id = ?",
+            (payload.group_id, teacher_id),
+        ).fetchone()
         if not group:
             raise HTTPException(status_code=404, detail="group not found")
         conn.execute(
@@ -744,12 +760,12 @@ def rankings(
 
 @app.get("/api/teacher/stats.csv", response_class=PlainTextResponse)
 def teacher_stats_csv(request: Request, group_id: str | None = None) -> str:
-    require_teacher(request)
+    teacher_id = require_teacher(request)
     out = io.StringIO()
     writer = csv.writer(out)
     writer.writerow(["group_code", "public_code", "app_id", "activity_id", "attempts", "best_score", "last_score_at"])
-    params: list[Any] = []
-    where = "WHERE i.active = 1"
+    params: list[Any] = [teacher_id]
+    where = "WHERE i.active = 1 AND g.created_by_teacher_id = ?"
     if group_id:
         where += " AND i.group_id = ?"
         params.append(group_id)
@@ -784,7 +800,7 @@ def teacher_stats_csv(request: Request, group_id: str | None = None) -> str:
 
 @app.get("/api/teacher/summary")
 def teacher_summary(request: Request) -> dict[str, Any]:
-    require_teacher(request)
+    teacher_id = require_teacher(request)
     with get_conn() as conn:
         totals = conn.execute(
             """
@@ -793,7 +809,10 @@ def teacher_summary(request: Request) -> dict[str, Any]:
                 SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) AS active,
                 SUM(CASE WHEN active = 0 THEN 1 ELSE 0 END) AS inactive
             FROM student_identities
-            """
+            JOIN groups g ON g.id = student_identities.group_id
+            WHERE g.created_by_teacher_id = ?
+            """,
+            (teacher_id,),
         ).fetchone()
         groups = conn.execute(
             """
@@ -806,10 +825,12 @@ def teacher_summary(request: Request) -> dict[str, Any]:
                 SUM(CASE WHEN i.active = 1 THEN 1 ELSE 0 END) AS active
             FROM groups g
             LEFT JOIN student_identities i ON i.group_id = g.id
+            WHERE g.created_by_teacher_id = ?
             GROUP BY g.id, g.name, g.tenant_id, g.created_at
             ORDER BY g.created_at DESC
             LIMIT 20
-            """
+            """,
+            (teacher_id,),
         ).fetchall()
     return {
         "total": int(totals["total"] or 0),
@@ -831,7 +852,7 @@ def teacher_summary(request: Request) -> dict[str, Any]:
 
 @app.get("/api/teacher/identities")
 def teacher_identities(request: Request, limit: int = Query(200, ge=1, le=500)) -> dict[str, Any]:
-    require_teacher(request)
+    teacher_id = require_teacher(request)
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -840,10 +861,11 @@ def teacher_identities(request: Request, limit: int = Query(200, ge=1, le=500)) 
             FROM student_identities i
             JOIN groups g ON g.id = i.group_id
             WHERE i.active = 1
+              AND g.created_by_teacher_id = ?
             ORDER BY i.created_at DESC, i.public_code
             LIMIT ?
             """,
-            (limit,),
+            (teacher_id, limit),
         ).fetchall()
     return {
         "identities": [
@@ -864,7 +886,7 @@ def teacher_identities(request: Request, limit: int = Query(200, ge=1, le=500)) 
 
 @app.get("/api/teacher/identities/by-code/{public_code}")
 def teacher_identity_by_code(public_code: str, request: Request) -> dict[str, Any]:
-    require_teacher(request)
+    teacher_id = require_teacher(request)
     code = normalize_code(public_code)
     with get_conn() as conn:
         row = conn.execute(
@@ -873,9 +895,11 @@ def teacher_identity_by_code(public_code: str, request: Request) -> dict[str, An
                    g.id AS group_id, g.name AS group_name, g.tenant_id
             FROM student_identities i
             JOIN groups g ON g.id = i.group_id
-            WHERE i.public_code = ? AND i.active = 1
+            WHERE i.public_code = ?
+              AND i.active = 1
+              AND g.created_by_teacher_id = ?
             """,
-            (code,),
+            (code, teacher_id),
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="identity not found")
@@ -895,9 +919,14 @@ def teacher_identity_by_code(public_code: str, request: Request) -> dict[str, An
 
 @app.get("/api/groups/{group_id}/cards", response_class=HTMLResponse)
 def printable_cards(group_id: str, request: Request) -> str:
-    require_teacher(request)
+    teacher_id = require_teacher(request)
     with get_conn() as conn:
-        group = conn.execute("SELECT * FROM groups WHERE id = ?", (group_id,)).fetchone()
+        group = conn.execute(
+            "SELECT * FROM groups WHERE id = ? AND created_by_teacher_id = ?",
+            (group_id, teacher_id),
+        ).fetchone()
+        if not group:
+            raise HTTPException(status_code=404, detail="group not found")
         rows = conn.execute(
             """
             SELECT id, public_code FROM student_identities
@@ -906,8 +935,6 @@ def printable_cards(group_id: str, request: Request) -> str:
             """,
             (group_id,),
         ).fetchall()
-    if not group:
-        raise HTTPException(status_code=404, detail="group not found")
     cards = "\n".join(
         f"<article><h2>EduTicTac</h2><p>Codi</p><strong>{row['public_code']}</strong>"
         "<p>PIN</p><em>Consulta la targeta original o regenera'l</em>"
@@ -932,11 +959,17 @@ h2{{font-size:18px;margin:0 0 8px}}p{{margin:6px 0 2px}}strong{{font-size:28px}}
 @app.get("/api/groups/{group_id}/csv", response_class=PlainTextResponse)
 def export_codes_csv(group_id: str, request: Request) -> str:
     """Export only public codes. PIN export is intentionally unavailable later."""
-    require_teacher(request)
+    teacher_id = require_teacher(request)
     out = io.StringIO()
     writer = csv.writer(out)
     writer.writerow(["codi", "grup"])
     with get_conn() as conn:
+        group = conn.execute(
+            "SELECT id FROM groups WHERE id = ? AND created_by_teacher_id = ?",
+            (group_id, teacher_id),
+        ).fetchone()
+        if not group:
+            raise HTTPException(status_code=404, detail="group not found")
         rows = conn.execute(
             """
             SELECT i.public_code, g.name FROM student_identities i
@@ -953,9 +986,15 @@ def export_codes_csv(group_id: str, request: Request) -> str:
 
 @app.post("/api/apps/{app_id}/roster")
 def app_roster(app_id: str, payload: AppRosterIn, request: Request) -> dict[str, Any]:
-    require_teacher(request)
+    teacher_id = require_teacher(request)
     app_key = normalize_app_id(app_id)
     with get_conn() as conn:
+        group = conn.execute(
+            "SELECT id FROM groups WHERE id = ? AND created_by_teacher_id = ?",
+            (payload.group_id, teacher_id),
+        ).fetchone()
+        if not group:
+            raise HTTPException(status_code=404, detail="group not found")
         rows = conn.execute(
             """
             SELECT id, public_code FROM student_identities
